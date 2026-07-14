@@ -32,6 +32,17 @@ jobs:
           Copy-Item -Recurse -Force "$template\build-aux" "$env:GITHUB_WORKSPACE\build-aux"
           Copy-Item -Recurse -Force "$template\cmake" "$env:GITHUB_WORKSPACE\cmake"
           Copy-Item -Force "$template\CMakePresets.json" "$env:GITHUB_WORKSPACE\CMakePresets.json"
+
+          # Sync Guardian uses the OBS frontend API and Qt dock UI.
+          $presetsPath = "$env:GITHUB_WORKSPACE\CMakePresets.json"
+          $presets = Get-Content -Raw $presetsPath | ConvertFrom-Json
+          $templatePreset = $presets.configurePresets | Where-Object { $_.name -eq 'template' }
+          if ($null -eq $templatePreset) {
+            throw 'Could not find the template configure preset.'
+          }
+          $templatePreset.cacheVariables.ENABLE_FRONTEND_API = $true
+          $templatePreset.cacheVariables.ENABLE_QT = $true
+          $presets | ConvertTo-Json -Depth 100 | Set-Content -Encoding utf8 $presetsPath
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\.github\scripts" | Out-Null
           Copy-Item -Recurse -Force "$template\.github\scripts\*" "$env:GITHUB_WORKSPACE\.github\scripts"
 
