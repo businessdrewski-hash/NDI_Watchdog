@@ -1,36 +1,23 @@
-# Detection and recovery design
+# Detection and recovery model
 
-## Background watchdog
+Sync Guardian samples timestamps every 250 ms in a background watchdog and refreshes the visible dock every 1000 ms.
 
-The watchdog samples every 250 ms on its own thread. It handles timestamp sampling, stall/drift persistence, reset initiation, the reset-pulse deadline, exact settings restoration, verification, cooldowns, and optional automatic escalation. The Qt dock only presents the latest state once per second.
+## Drift values
 
-## A/V comparison
+- **Raw transport drift:** filtered DistroAV video/audio timestamp movement relative to the calibrated baseline.
+- **Corrected output drift:** raw transport drift plus the accumulated Adaptive Soft Sync correction.
 
-Video and desktop-audio timestamps are projected to the same monotonic wall-clock moment. The visible offset uses a 10-second median. A robust 60-second slope drives the displayed rate, while a robust 120-second slope is available to the optional Soft Sync controller. Thirty stable seconds establish the baseline.
+The main diagnostic line shows raw drift. When Adaptive Soft Sync is active, it also shows the estimated corrected output drift.
 
-When Adaptive Soft Sync is attached, measurement uses the filter's raw input timestamp rather than a possibly corrected post-filter timestamp. The controller then adds its accumulated sample trim separately to estimate corrected output drift.
+## Persistent drift threshold
 
-## Reset pulse and settings preservation
+- Adaptive Soft Sync disabled: threshold uses raw transport drift.
+- Adaptive Soft Sync active and attached: threshold uses corrected output drift.
 
-A reset temporarily flips DistroAV FrameSync to force receiver reconstruction. Before the pulse, Sync Guardian captures the complete source settings and explicitly records FrameSync, latency, timing mode, and NDI target. At the pulse deadline it clears the temporary settings, restores the complete captured object, verifies the critical values, and retries once if necessary.
+This prevents a drift already corrected at the audio output from unnecessarily triggering a receiver reset.
 
-The temporary flip is not a requested final setting. An audio source that entered the reset with FrameSync off must finish with FrameSync off.
+## Stall recovery
 
-## Adaptive Soft Sync
+Stall detection remains based on packet/timestamp freshness and is not affected by Adaptive Soft Sync.
 
-Soft Sync is optional, disabled by default, and removable. It applies a bounded linear resample correction to desktop audio. Positive ppm adds a tiny amount of duration to slow audio; negative ppm removes a tiny amount to speed it. Defaults are a 12 ms position dead zone, 50 ppm maximum, and 1 ppm/sec slew.
-
-The mapped mic is not corrected unless linked explicitly. Disabling Soft Sync detaches the private filters and zeros all correction state.
-
-Persistent-drift reset fallback still watches raw transport drift. A successful video/group recovery recenters accumulated desktop and linked-mic trim, preventing Soft Sync from hiding an ever-growing transport offset indefinitely.
-
-## Default safeguards
-
-- Observe only by default.
-- 1000 ms stale threshold plus 500 ms confirmation.
-- 200 ms drift for 10 seconds.
-- 180-second automatic reset cooldown.
-- Three automatic reset actions per hour.
-- Thirty-second startup/scene-change grace.
-- Five-second post-reset verification.
-- At most one full-group escalation after a targeted reset fails.
+Reset pulses capture the source's DistroAV settings and OBS-level runtime state, temporarily invert FrameSync to recreate the receiver, then restore and verify the saved state. Full-group rebuild uses the same preservation path for every mapped source.

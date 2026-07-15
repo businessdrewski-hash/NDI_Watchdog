@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Sync Guardian v0.3.0 - OBS companion plugin for DistroAV/NDI monitoring and recovery.
+// Sync Guardian v0.3.2 - OBS companion plugin for DistroAV/NDI monitoring and recovery.
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -16,6 +16,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -31,6 +32,7 @@
 #include <QStringList>
 #include <QTableWidget>
 #include <QTextEdit>
+#include <QToolButton>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -57,7 +59,7 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("sync-guardian", "en-US")
 
 #ifndef PLUGIN_VERSION
-#define PLUGIN_VERSION "0.3.0"
+#define PLUGIN_VERSION "0.3.2"
 #endif
 
 namespace {
@@ -120,21 +122,13 @@ static double median(std::vector<double> values)
 	return result;
 }
 
-static QString driftDirectionDescription(double driftMs, double rateMsPerMinute)
+static QString driftDirectionShort(double rateMsPerMinute)
 {
-	if (!std::isfinite(driftMs))
-		return QStringLiteral("waiting for baseline");
-	if (!std::isfinite(rateMsPerMinute)) {
-		if (std::fabs(driftMs) < 8.0)
-			return QStringLiteral("near baseline; trend still settling");
-		return driftMs < 0.0 ? QStringLiteral("audio currently leads video")
-				     : QStringLiteral("audio currently lags video");
-	}
+	if (!std::isfinite(rateMsPerMinute))
+		return QStringLiteral("Trend settling");
 	if (std::fabs(rateMsPerMinute) < 0.25)
-		return QStringLiteral("timing trend is stable");
-	if (rateMsPerMinute < 0.0)
-		return QStringLiteral("video is gradually dragging behind audio");
-	return QStringLiteral("video is gradually rushing ahead of audio");
+		return QStringLiteral("Stable");
+	return rateMsPerMinute < 0.0 ? QStringLiteral("Video dragging") : QStringLiteral("Video rushing");
 }
 
 static QString latencyName(long long value)
@@ -263,6 +257,7 @@ struct DiagnosticSample {
 	double rawOffsetMs = std::numeric_limits<double>::quiet_NaN();
 	double filteredOffsetMs = std::numeric_limits<double>::quiet_NaN();
 	double driftMs = std::numeric_limits<double>::quiet_NaN();
+	double correctedDriftMs = std::numeric_limits<double>::quiet_NaN();
 	double driftRateMsPerMinute = std::numeric_limits<double>::quiet_NaN();
 	double videoAgeMs = std::numeric_limits<double>::quiet_NaN();
 	double desktopAgeMs = std::numeric_limits<double>::quiet_NaN();
@@ -499,11 +494,113 @@ static void registerSoftSyncFilter()
 	obs_register_source(&info);
 }
 
+// DistroAV's property object is only one part of an OBS source's state.  Audio
+// routing, sync offset, monitoring, mute/volume, source flags and deinterlacing
+// live on obs_source_t itself.  A reset pulse must preserve both layers.
+struct SourceRuntimeSnapshot {
+	bool captured = false;
+	bool enabled = true;
+	bool hasAudio = false;
+	bool hasVideo = false;
+	bool muted = false;
+	float volume = 1.0f;
+	float balance = 0.5f;
+	int64_t syncOffsetNs = 0;
+	uint32_t audioMixers = 0;
+	enum obs_monitoring_type monitoringType = OBS_MONITORING_TYPE_NONE;
+	bool pushToMuteEnabled = false;
+	uint64_t pushToMuteDelay = 0;
+	bool pushToTalkEnabled = false;
+	uint64_t pushToTalkDelay = 0;
+	uint32_t sourceFlags = 0;
+	enum obs_deinterlace_mode deinterlaceMode = OBS_DEINTERLACE_MODE_DISABLE;
+	enum obs_deinterlace_field_order deinterlaceFieldOrder = OBS_DEINTERLACE_FIELD_ORDER_TOP;
+
+	void capture(obs_source_t *source)
+	{
+		if (!source)
+			return;
+		const uint32_t outputFlags = obs_source_get_output_flags(source);
+		hasAudio = (outputFlags & OBS_SOURCE_AUDIO) != 0;
+		hasVideo = (outputFlags & OBS_SOURCE_VIDEO) != 0;
+		enabled = obs_source_enabled(source);
+		sourceFlags = obs_source_get_flags(source);
+		if (hasAudio) {
+			muted = obs_source_muted(source);
+			volume = obs_source_get_volume(source);
+			balance = obs_source_get_balance_value(source);
+			syncOffsetNs = obs_source_get_sync_offset(source);
+			audioMixers = obs_source_get_audio_mixers(source);
+			monitoringType = obs_source_get_monitoring_type(source);
+			pushToMuteEnabled = obs_source_push_to_mute_enabled(source);
+			pushToMuteDelay = obs_source_get_push_to_mute_delay(source);
+			pushToTalkEnabled = obs_source_push_to_talk_enabled(source);
+			pushToTalkDelay = obs_source_get_push_to_talk_delay(source);
+		}
+		if (hasVideo) {
+			deinterlaceMode = obs_source_get_deinterlace_mode(source);
+			deinterlaceFieldOrder = obs_source_get_deinterlace_field_order(source);
+		}
+		captured = true;
+	}
+
+	void restore(obs_source_t *source) const
+	{
+		if (!captured || !source)
+			return;
+		obs_source_set_enabled(source, enabled);
+		obs_source_set_flags(source, sourceFlags);
+		if (hasAudio) {
+			obs_source_set_muted(source, muted);
+			obs_source_set_volume(source, volume);
+			obs_source_set_balance_value(source, balance);
+			obs_source_set_sync_offset(source, syncOffsetNs);
+			obs_source_set_audio_mixers(source, audioMixers);
+			obs_source_set_monitoring_type(source, monitoringType);
+			obs_source_enable_push_to_mute(source, pushToMuteEnabled);
+			obs_source_set_push_to_mute_delay(source, pushToMuteDelay);
+			obs_source_enable_push_to_talk(source, pushToTalkEnabled);
+			obs_source_set_push_to_talk_delay(source, pushToTalkDelay);
+		}
+		if (hasVideo) {
+			obs_source_set_deinterlace_mode(source, deinterlaceMode);
+			obs_source_set_deinterlace_field_order(source, deinterlaceFieldOrder);
+		}
+	}
+
+	bool matches(obs_source_t *source) const
+	{
+		if (!captured || !source)
+			return false;
+		if (obs_source_enabled(source) != enabled || obs_source_get_flags(source) != sourceFlags)
+			return false;
+		if (hasAudio) {
+			if (obs_source_muted(source) != muted ||
+			    std::fabs(obs_source_get_volume(source) - volume) > 0.0001f ||
+			    std::fabs(obs_source_get_balance_value(source) - balance) > 0.0001f ||
+			    obs_source_get_sync_offset(source) != syncOffsetNs ||
+			    obs_source_get_audio_mixers(source) != audioMixers ||
+			    obs_source_get_monitoring_type(source) != monitoringType ||
+			    obs_source_push_to_mute_enabled(source) != pushToMuteEnabled ||
+			    obs_source_get_push_to_mute_delay(source) != pushToMuteDelay ||
+			    obs_source_push_to_talk_enabled(source) != pushToTalkEnabled ||
+			    obs_source_get_push_to_talk_delay(source) != pushToTalkDelay)
+				return false;
+		}
+		if (hasVideo &&
+		    (obs_source_get_deinterlace_mode(source) != deinterlaceMode ||
+		     obs_source_get_deinterlace_field_order(source) != deinterlaceFieldOrder))
+			return false;
+		return true;
+	}
+};
+
 struct SourceState {
 	QString role;
 	QString sourceName;
 	obs_weak_source_t *weak = nullptr;
 	obs_data_t *snapshot = nullptr;
+	SourceRuntimeSnapshot snapshotRuntime;
 	bool monitorAudio = false;
 
 	std::atomic<uint64_t> lastAudioTimestampNs{0};
@@ -631,6 +728,7 @@ struct ResetTicket {
 	long long expectedSyncMode = 0;
 	QString expectedNdiTarget;
 	QString role;
+	SourceRuntimeSnapshot runtime;
 	std::atomic_bool restored{false};
 
 	bool knownSettingsMatch(obs_data_t *settings) const
@@ -652,23 +750,27 @@ struct ResetTicket {
 		if (weak && original) {
 			obs_source_t *source = obs_weak_source_get_source(weak);
 			if (source) {
-				// The pulse temporarily changes one setting only. Clear that temporary
-				// object, restore the complete captured source settings, and verify the
-				// DistroAV properties that most affect timing and receiver identity.
-				obs_source_reset_settings(source, original);
+				// Apply the saved object non-destructively. obs_source_reset_settings()
+				// clears keys that are absent from the snapshot, which can wipe DistroAV
+				// properties that were left at defaults or added by a newer plugin build.
+				// obs_source_update() restores the captured values while leaving every
+				// unrelated/unknown property intact.
+				obs_source_update(source, original);
+				runtime.restore(source);
 				obs_data_t *verify = obs_source_get_settings(source);
-				settingsMatch = knownSettingsMatch(verify);
+				settingsMatch = knownSettingsMatch(verify) && runtime.matches(source);
 				obs_data_release(verify);
 				if (!settingsMatch) {
-					// Retry with every critical value explicit. This covers settings that
-					// DistroAV may omit from serialized data when they equal a default.
+					// Retry with every critical DistroAV value explicit, then restore OBS's
+					// source-level audio routing and presentation properties again.
 					obs_data_set_bool(original, kPropFrameSync, expectedFrameSync);
 					obs_data_set_int(original, kPropLatency, expectedLatency);
 					obs_data_set_int(original, kPropSync, expectedSyncMode);
 					obs_data_set_string(original, kPropSource, expectedNdiTarget.toUtf8().constData());
-					obs_source_reset_settings(source, original);
+					obs_source_update(source, original);
+					runtime.restore(source);
 					verify = obs_source_get_settings(source);
-					settingsMatch = knownSettingsMatch(verify);
+					settingsMatch = knownSettingsMatch(verify) && runtime.matches(source);
 					obs_data_release(verify);
 				}
 				obs_source_release(source);
@@ -843,6 +945,9 @@ private:
 	QLabel *healthLabel_ = nullptr;
 	QLabel *avOffsetLabel_ = nullptr;
 	QLabel *driftLabel_ = nullptr;
+	QLabel *driftTrendLabel_ = nullptr;
+	QWidget *diagnosticDetailsWidget_ = nullptr;
+	QToolButton *diagnosticDetailsToggle_ = nullptr;
 	QLabel *micOffsetLabel_ = nullptr;
 	QLabel *obsStatsLabel_ = nullptr;
 	QLabel *softSyncStatusLabel_ = nullptr;
@@ -925,6 +1030,38 @@ private:
 					      OBS_INVALID_HOTKEY_ID, OBS_INVALID_HOTKEY_ID,
 					      OBS_INVALID_HOTKEY_ID, OBS_INVALID_HOTKEY_ID};
 
+	QGroupBox *createCollapsibleSection(const QString &title, QWidget *parent, QWidget *&content,
+					     bool expanded = true)
+	{
+		auto *box = new QGroupBox(title, parent);
+		auto *boxLayout = new QVBoxLayout(box);
+		boxLayout->setContentsMargins(6, 5, 6, 6);
+		boxLayout->setSpacing(3);
+
+		auto *header = new QHBoxLayout();
+		header->setContentsMargins(0, 0, 0, 0);
+		header->addStretch();
+		auto *toggle = new QToolButton(box);
+		toggle->setCheckable(true);
+		toggle->setChecked(expanded);
+		toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+		toggle->setText(expanded ? QStringLiteral("Hide") : QStringLiteral("Show"));
+		toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+		toggle->setToolTip(QStringLiteral("Show or hide this section."));
+		header->addWidget(toggle);
+		boxLayout->addLayout(header);
+
+		content = new QWidget(box);
+		content->setVisible(expanded);
+		boxLayout->addWidget(content);
+		QObject::connect(toggle, &QToolButton::toggled, [content, toggle](bool shown) {
+			content->setVisible(shown);
+			toggle->setArrowType(shown ? Qt::DownArrow : Qt::RightArrow);
+			toggle->setText(shown ? QStringLiteral("Hide") : QStringLiteral("Show"));
+		});
+		return box;
+	}
+
 	void buildUi()
 	{
 		panel_ = new QWidget();
@@ -939,6 +1076,7 @@ private:
 			"#SyncGuardianPanel QLabel, #SyncGuardianPanel QCheckBox { color: #dde3ec; }"
 			"#SyncGuardianPanel QTableWidget { color: #e2e7ef; }"
 			"#SyncGuardianPanel QPushButton { padding: 2px 5px; min-height: 20px; }"
+			"#SyncGuardianPanel QToolButton { color: #cfd6e1; padding: 1px 4px; }"
 			"#SyncGuardianPanel QComboBox, #SyncGuardianPanel QSpinBox { min-height: 20px; }"
 			"#SyncGuardianPanel QToolTip { color: #f3f6fb; background-color: #2e3440; border: 1px solid #7f8a9a; }"));
 
@@ -962,19 +1100,20 @@ private:
 		root->setSpacing(5);
 		root->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
-		auto *sourceBox = new QGroupBox(QStringLiteral("NDI source mapping"), scrollContent);
-		auto *sourceForm = new QFormLayout(sourceBox);
-		sourceForm->setContentsMargins(6, 5, 6, 6);
+		QWidget *sourceContent = nullptr;
+		auto *sourceBox = createCollapsibleSection(QStringLiteral("NDI source mapping"), scrollContent, sourceContent);
+		auto *sourceForm = new QFormLayout(sourceContent);
+		sourceForm->setContentsMargins(0, 0, 0, 0);
 		sourceForm->setHorizontalSpacing(6);
 		sourceForm->setVerticalSpacing(3);
 		auto *sourceHelp = new QLabel(QStringLiteral(
 			"Choose the DistroAV receiver sources on this streaming PC. Video timing is read by a pass-through timestamp probe."),
-			sourceBox);
+			sourceContent);
 		sourceHelp->setWordWrap(true);
 		sourceHelp->setStyleSheet(QStringLiteral("color: #c7ced8;"));
 		sourceForm->addRow(sourceHelp);
 		for (size_t i = 0; i < sourceCombos_.size(); ++i) {
-			sourceCombos_[i] = new QComboBox(sourceBox);
+			sourceCombos_[i] = new QComboBox(sourceContent);
 			sourceCombos_[i]->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 			sourceCombos_[i]->setToolTip(QStringLiteral("Select the OBS DistroAV source used for this role. Use Rescan Sources after adding or renaming a source."));
 			sourceForm->addRow(states_[i].role + QStringLiteral(":"), sourceCombos_[i]);
@@ -987,12 +1126,13 @@ private:
 		}
 		root->addWidget(sourceBox);
 
-		auto *automationBox = new QGroupBox(QStringLiteral("Automatic detection and recovery"), scrollContent);
-		auto *automationForm = new QFormLayout(automationBox);
-		automationForm->setContentsMargins(6, 5, 6, 6);
+		QWidget *automationContent = nullptr;
+		auto *automationBox = createCollapsibleSection(QStringLiteral("Automatic detection and recovery"), scrollContent, automationContent);
+		auto *automationForm = new QFormLayout(automationContent);
+		automationForm->setContentsMargins(0, 0, 0, 0);
 		automationForm->setHorizontalSpacing(6);
 		automationForm->setVerticalSpacing(3);
-		automationMode_ = new QComboBox(automationBox);
+		automationMode_ = new QComboBox(automationContent);
 		automationMode_->addItem(QStringLiteral("Observe only"), static_cast<int>(AutomationMode::Observe));
 		automationMode_->addItem(QStringLiteral("Ask before resetting"), static_cast<int>(AutomationMode::Ask));
 		automationMode_->addItem(QStringLiteral("Fully automatic"), static_cast<int>(AutomationMode::Automatic));
@@ -1002,19 +1142,19 @@ private:
 
 		auto *simpleHelp = new QLabel(QStringLiteral(
 			"Recommended: begin with Observe only. Sync Guardian waits for real video and audio timestamps before judging sync."),
-			automationBox);
+			automationContent);
 		simpleHelp->setWordWrap(true);
 		simpleHelp->setStyleSheet(QStringLiteral("color: #c7ced8;"));
 		automationForm->addRow(simpleHelp);
 
-		advancedToggleButton_ = new QPushButton(QStringLiteral("Show advanced detection settings"), automationBox);
+		advancedToggleButton_ = new QPushButton(QStringLiteral("Show advanced detection settings"), automationContent);
 		advancedToggleButton_->setCheckable(true);
 		advancedToggleButton_->setChecked(false);
 		advancedToggleButton_->setToolTip(QStringLiteral(
 			"Shows timing thresholds and safety limits. The defaults are deliberately conservative and normally do not need adjustment."));
 		automationForm->addRow(advancedToggleButton_);
 
-		advancedSettingsWidget_ = new QWidget(automationBox);
+		advancedSettingsWidget_ = new QWidget(automationContent);
 		auto *advancedForm = new QFormLayout(advancedSettingsWidget_);
 		advancedForm->setContentsMargins(0, 2, 0, 0);
 		advancedForm->setHorizontalSpacing(6);
@@ -1057,7 +1197,7 @@ private:
 		verifyDelaySec_ = createSpin(advancedSettingsWidget_, 2, 30, 5, QStringLiteral(" sec"));
 		videoStallMs_->setToolTip(QStringLiteral("Default 1000 ms plus a fixed 500 ms confirmation window before action."));
 		audioStallMs_->setToolTip(QStringLiteral("Default 1000 ms plus a fixed 500 ms confirmation window before action."));
-		driftThresholdMs_->setToolTip(QStringLiteral("A single timestamp jump does not trigger recovery; the filtered offset must remain beyond this value."));
+		driftThresholdMs_->setToolTip(QStringLiteral("A single timestamp jump does not trigger recovery. With Adaptive Soft Sync active, this threshold follows the estimated corrected output drift; otherwise it follows raw transport drift."));
 		driftPersistenceMs_->setToolTip(QStringLiteral("How long a filtered A/V offset must remain beyond the threshold before recovery is suggested."));
 		cooldownSec_->setToolTip(QStringLiteral("Minimum delay between automatic recovery attempts."));
 		maxAutoResetsPerHour_->setToolTip(QStringLiteral("Hard safety cap across targeted resets and full-group escalations."));
@@ -1087,31 +1227,32 @@ private:
 		automationForm->addRow(advancedSettingsWidget_);
 		root->addWidget(automationBox);
 
-		auto *softSyncBox = new QGroupBox(QStringLiteral("Experimental adaptive audio sync"), scrollContent);
-		auto *softSyncForm = new QFormLayout(softSyncBox);
-		softSyncForm->setContentsMargins(6, 5, 6, 6);
+		QWidget *softSyncContent = nullptr;
+		auto *softSyncBox = createCollapsibleSection(QStringLiteral("Experimental adaptive audio sync"), scrollContent, softSyncContent);
+		auto *softSyncForm = new QFormLayout(softSyncContent);
+		softSyncForm->setContentsMargins(0, 0, 0, 0);
 		softSyncForm->setHorizontalSpacing(6);
 		softSyncForm->setVerticalSpacing(3);
 		auto *softSyncHelp = new QLabel(QStringLiteral(
 			"Optional and disabled by default. Soft Sync applies a tiny, slowly changing resample correction to desktop audio instead of making large cuts. Disabling it removes the filter and returns the source to untouched pass-through audio."),
-			softSyncBox);
+			softSyncContent);
 		softSyncHelp->setWordWrap(true);
 		softSyncHelp->setStyleSheet(QStringLiteral("color: #c7ced8;"));
 		softSyncForm->addRow(softSyncHelp);
 
-		enableSoftSync_ = new QCheckBox(QStringLiteral("Enable Adaptive Soft Sync"), softSyncBox);
+		enableSoftSync_ = new QCheckBox(QStringLiteral("Enable Adaptive Soft Sync"), softSyncContent);
 		enableSoftSync_->setChecked(false);
 		enableSoftSync_->setToolTip(QStringLiteral("Attaches Sync Guardian's private adaptive resampling filter to the mapped desktop-audio source. Off means no resampling code is active on the source."));
 		softSyncForm->addRow(enableSoftSync_);
 
-		softSyncLinkMic_ = new QCheckBox(QStringLiteral("Apply the same correction to the mapped mic"), softSyncBox);
+		softSyncLinkMic_ = new QCheckBox(QStringLiteral("Apply the same correction to the mapped mic"), softSyncContent);
 		softSyncLinkMic_->setChecked(false);
 		softSyncLinkMic_->setToolTip(QStringLiteral("Keeps desktop audio and microphone on the same corrected rate. Leave this off when the microphone must stay aligned to a separate camera feed."));
 		softSyncForm->addRow(softSyncLinkMic_);
 
-		softSyncDeadZoneMs_ = createSpin(softSyncBox, 5, 100, 12, QStringLiteral(" ms"));
-		softSyncMaxPpm_ = createSpin(softSyncBox, 5, 200, 50, QStringLiteral(" ppm"));
-		softSyncSlewPpmPerSec_ = createSpin(softSyncBox, 1, 20, 1, QStringLiteral(" ppm/sec"));
+		softSyncDeadZoneMs_ = createSpin(softSyncContent, 5, 100, 12, QStringLiteral(" ms"));
+		softSyncMaxPpm_ = createSpin(softSyncContent, 5, 200, 50, QStringLiteral(" ppm"));
+		softSyncSlewPpmPerSec_ = createSpin(softSyncContent, 1, 20, 1, QStringLiteral(" ppm/sec"));
 		softSyncDeadZoneMs_->setToolTip(QStringLiteral("Small drift inside this range is treated as normal jitter and does not add position correction."));
 		softSyncMaxPpm_->setToolTip(QStringLiteral("Maximum speed correction. 50 ppm is deliberately conservative and is about 2.4 samples per second at 48 kHz."));
 		softSyncSlewPpmPerSec_->setToolTip(QStringLiteral("How quickly the correction may change. A slow slew avoids audible or oscillating corrections."));
@@ -1119,12 +1260,12 @@ private:
 		softSyncForm->addRow(QStringLiteral("Maximum correction:"), softSyncMaxPpm_);
 		softSyncForm->addRow(QStringLiteral("Correction slew limit:"), softSyncSlewPpmPerSec_);
 
-		softSyncStatusLabel_ = new QLabel(QStringLiteral("Soft Sync: Off — audio passes through unchanged"), softSyncBox);
+		softSyncStatusLabel_ = new QLabel(QStringLiteral("Soft Sync: Off — audio passes through unchanged"), softSyncContent);
 		softSyncStatusLabel_->setWordWrap(true);
 		softSyncStatusLabel_->setStyleSheet(QStringLiteral("color: #d8dde6;"));
 		softSyncForm->addRow(softSyncStatusLabel_);
 
-		auto *disableSoftSyncButton = new QPushButton(QStringLiteral("Disable and remove Soft Sync filters"), softSyncBox);
+		auto *disableSoftSyncButton = new QPushButton(QStringLiteral("Disable and remove Soft Sync filters"), softSyncContent);
 		disableSoftSyncButton->setToolTip(QStringLiteral("Immediately disables correction, removes Sync Guardian's private audio filters, and leaves NDI audio as normal pass-through."));
 		softSyncForm->addRow(disableSoftSyncButton);
 		root->addWidget(softSyncBox);
@@ -1140,32 +1281,33 @@ private:
 			appendEvent(QStringLiteral("Adaptive Soft Sync disabled and private audio filters removed"), false);
 		});
 
-		auto *controlBox = new QGroupBox(QStringLiteral("Manual recovery"), scrollContent);
-		auto *controlGrid = new QGridLayout(controlBox);
-		controlGrid->setContentsMargins(6, 5, 6, 6);
+		QWidget *controlContent = nullptr;
+		auto *controlBox = createCollapsibleSection(QStringLiteral("Manual recovery"), scrollContent, controlContent);
+		auto *controlGrid = new QGridLayout(controlContent);
+		controlGrid->setContentsMargins(0, 0, 0, 0);
 		controlGrid->setHorizontalSpacing(4);
 		controlGrid->setVerticalSpacing(3);
-		manualSuggestionLabel_ = new QLabel(QStringLiteral("Suggested manual action: none — monitoring healthy. Hover over a button for help."), controlBox);
+		manualSuggestionLabel_ = new QLabel(QStringLiteral("Suggested manual action: none — monitoring healthy. Hover over a button for help."), controlContent);
 		manualSuggestionLabel_->setWordWrap(true);
 		manualSuggestionLabel_->setObjectName(QStringLiteral("SyncGuardianManualSuggestion"));
 		manualSuggestionLabel_->setToolTip(QStringLiteral("Shows the simplest recommended manual action when Sync Guardian detects a likely issue."));
 		controlGrid->addWidget(manualSuggestionLabel_, 0, 0, 1, 2);
 
-		resetVideoButton_ = new QPushButton(QStringLiteral("Reset Video Only"), controlBox);
-		resetDesktopButton_ = new QPushButton(QStringLiteral("Reset Desktop Audio Only"), controlBox);
-		resetMicButton_ = new QPushButton(QStringLiteral("Reset Mic Only"), controlBox);
-		resetBothAudioButton_ = new QPushButton(QStringLiteral("Reset Both Audio Sources"), controlBox);
-		rebuildGroupButton_ = new QPushButton(QStringLiteral("Rebuild Entire Sync Group"), controlBox);
-		auto *captureSnapshot = new QPushButton(QStringLiteral("Save Current Settings"), controlBox);
-		auto *restoreSnapshot = new QPushButton(QStringLiteral("Restore Saved Settings"), controlBox);
-		auto *markEventButton = new QPushButton(QStringLiteral("Add Log Marker"), controlBox);
-		auto *refreshSources = new QPushButton(QStringLiteral("Rescan Sources"), controlBox);
+		resetVideoButton_ = new QPushButton(QStringLiteral("Reset Video Only"), controlContent);
+		resetDesktopButton_ = new QPushButton(QStringLiteral("Reset Desktop Audio Only"), controlContent);
+		resetMicButton_ = new QPushButton(QStringLiteral("Reset Mic Only"), controlContent);
+		resetBothAudioButton_ = new QPushButton(QStringLiteral("Reset Both Audio Sources"), controlContent);
+		rebuildGroupButton_ = new QPushButton(QStringLiteral("Rebuild Entire Sync Group"), controlContent);
+		auto *captureSnapshot = new QPushButton(QStringLiteral("Save Current Settings"), controlContent);
+		auto *restoreSnapshot = new QPushButton(QStringLiteral("Restore Saved Settings"), controlContent);
+		auto *markEventButton = new QPushButton(QStringLiteral("Add Log Marker"), controlContent);
+		auto *refreshSources = new QPushButton(QStringLiteral("Rescan Sources"), controlContent);
 
 		resetVideoButton_->setToolTip(QStringLiteral("Restarts only the mapped NDI video receiver. Use when video freezes or falls behind while audio remains healthy."));
 		resetDesktopButton_->setToolTip(QStringLiteral("Restarts only the mapped desktop/game audio receiver. Use when that audio stops or is the likely drifting stream."));
 		resetMicButton_->setToolTip(QStringLiteral("Restarts only the mapped microphone receiver."));
 		resetBothAudioButton_->setToolTip(QStringLiteral("Restarts both mapped NDI audio receivers together. Use when both audio streams are stale or need to be realigned together."));
-		rebuildGroupButton_->setToolTip(QStringLiteral("Restarts all mapped NDI receivers. This is the broadest and most disruptive recovery action."));
+		rebuildGroupButton_->setToolTip(QStringLiteral("Restarts all mapped NDI receivers while preserving each source's DistroAV properties, audio routing, sync offset, monitoring, and other OBS-level settings. This is the broadest recovery action."));
 		captureSnapshot->setToolTip(QStringLiteral("Saves the current DistroAV source settings in memory for this OBS session and records the current sync baseline when available."));
 		restoreSnapshot->setToolTip(QStringLiteral("Restores the settings saved with Save Current Settings, then rebuilds the mapped receivers."));
 		markEventButton->setToolTip(QStringLiteral("Adds a timestamped note to the Sync Guardian event log and, when enabled, the current recording chapter list."));
@@ -1181,15 +1323,15 @@ private:
 		controlGrid->addWidget(markEventButton, 5, 0);
 		controlGrid->addWidget(refreshSources, 5, 1);
 
-		pulseDurationMs_ = createSpin(controlBox, 50, 1500, 180, QStringLiteral(" ms"));
-		pulseDurationMs_->setToolTip(QStringLiteral("How long Sync Guardian temporarily changes FrameSync to force a receiver rebuild. The complete original source settings are restored and verified afterward; the default normally should not be changed."));
-		controlGrid->addWidget(new QLabel(QStringLiteral("Reset pulse duration:"), controlBox), 6, 0);
+		pulseDurationMs_ = createSpin(controlContent, 50, 1500, 180, QStringLiteral(" ms"));
+		pulseDurationMs_->setToolTip(QStringLiteral("How long Sync Guardian temporarily changes FrameSync to force a receiver rebuild. DistroAV properties and OBS-level source settings are captured, restored non-destructively, and verified afterward; the default normally should not be changed."));
+		controlGrid->addWidget(new QLabel(QStringLiteral("Reset pulse duration:"), controlContent), 6, 0);
 		controlGrid->addWidget(pulseDurationMs_, 6, 1);
-		chapterMarkers_ = new QCheckBox(QStringLiteral("Add recording chapter on actions"), controlBox);
+		chapterMarkers_ = new QCheckBox(QStringLiteral("Add recording chapter on actions"), controlContent);
 		chapterMarkers_->setChecked(true);
-		jsonLogging_ = new QCheckBox(QStringLiteral("Append events to sync-guardian-events.jsonl"), controlBox);
+		jsonLogging_ = new QCheckBox(QStringLiteral("Append events to sync-guardian-events.jsonl"), controlContent);
 		jsonLogging_->setChecked(true);
-		incidentReports_ = new QCheckBox(QStringLiteral("Capture 30 seconds before/after detected incidents"), controlBox);
+		incidentReports_ = new QCheckBox(QStringLiteral("Capture 30 seconds before/after detected incidents"), controlContent);
 		incidentReports_->setChecked(true);
 		controlGrid->addWidget(chapterMarkers_, 7, 0, 1, 2);
 		controlGrid->addWidget(jsonLogging_, 8, 0, 1, 2);
@@ -1236,28 +1378,49 @@ private:
 			appendEvent(QStringLiteral("NDI source list refreshed"), false);
 		});
 
-		auto *diagnosticsBox = new QGroupBox(QStringLiteral("Live diagnostics"), scrollContent);
-		auto *diagnosticsLayout = new QVBoxLayout(diagnosticsBox);
-		diagnosticsLayout->setContentsMargins(6, 5, 6, 6);
-		diagnosticsLayout->setSpacing(2);
-		overallSummaryLabel_ = new QLabel(QStringLiteral("Summary: starting monitoring"), diagnosticsBox);
+		QWidget *diagnosticsContent = nullptr;
+		auto *diagnosticsBox = createCollapsibleSection(QStringLiteral("Live diagnostics"), scrollContent,
+								 diagnosticsContent);
+		auto *diagnosticsLayout = new QVBoxLayout(diagnosticsContent);
+		diagnosticsLayout->setContentsMargins(0, 0, 0, 0);
+		diagnosticsLayout->setSpacing(3);
+		overallSummaryLabel_ = new QLabel(QStringLiteral("Summary: starting monitoring"), diagnosticsContent);
 		overallSummaryLabel_->setWordWrap(true);
-		overallSummaryLabel_->setStyleSheet(QStringLiteral("font-weight: 600;"));
-		automationStatusLabel_ = new QLabel(QStringLiteral("Automation: starting"), diagnosticsBox);
-		healthLabel_ = new QLabel(QStringLiteral("Detection confidence: 0/100"), diagnosticsBox);
-		avOffsetLabel_ = new QLabel(QStringLiteral("Video − Desktop Audio timestamp: —"), diagnosticsBox);
-		driftLabel_ = new QLabel(QStringLiteral("Drift from baseline: —"), diagnosticsBox);
-		micOffsetLabel_ = new QLabel(QStringLiteral("Mic − Desktop Audio timestamp: —"), diagnosticsBox);
-		obsStatsLabel_ = new QLabel(QStringLiteral("OBS: —"), diagnosticsBox);
+		overallSummaryLabel_->setStyleSheet(QStringLiteral("font-weight: 600; color: #e9edf4;"));
+		driftLabel_ = new QLabel(QStringLiteral("Drift from baseline: —"), diagnosticsContent);
+		driftLabel_->setWordWrap(true);
+		driftLabel_->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; color: #dde3ec;"));
+		driftTrendLabel_ = new QLabel(QStringLiteral("Trend: settling"), diagnosticsContent);
+		driftTrendLabel_->setWordWrap(true);
+		driftTrendLabel_->setStyleSheet(QStringLiteral("color: #cbd3df;"));
 		diagnosticsLayout->addWidget(overallSummaryLabel_);
-		diagnosticsLayout->addWidget(automationStatusLabel_);
-		diagnosticsLayout->addWidget(healthLabel_);
-		diagnosticsLayout->addWidget(avOffsetLabel_);
 		diagnosticsLayout->addWidget(driftLabel_);
-		diagnosticsLayout->addWidget(micOffsetLabel_);
-		diagnosticsLayout->addWidget(obsStatsLabel_);
+		diagnosticsLayout->addWidget(driftTrendLabel_);
 
-		statusTable_ = new QTableWidget(3, 8, diagnosticsBox);
+		diagnosticDetailsToggle_ = new QToolButton(diagnosticsContent);
+		diagnosticDetailsToggle_->setCheckable(true);
+		diagnosticDetailsToggle_->setChecked(false);
+		diagnosticDetailsToggle_->setArrowType(Qt::RightArrow);
+		diagnosticDetailsToggle_->setText(QStringLiteral("Show technical details"));
+		diagnosticDetailsToggle_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+		diagnosticsLayout->addWidget(diagnosticDetailsToggle_, 0, Qt::AlignLeft);
+
+		diagnosticDetailsWidget_ = new QWidget(diagnosticsContent);
+		auto *detailsLayout = new QVBoxLayout(diagnosticDetailsWidget_);
+		detailsLayout->setContentsMargins(0, 1, 0, 0);
+		detailsLayout->setSpacing(2);
+		automationStatusLabel_ = new QLabel(QStringLiteral("Automation: starting"), diagnosticDetailsWidget_);
+		healthLabel_ = new QLabel(QStringLiteral("Detection confidence: 0/100"), diagnosticDetailsWidget_);
+		avOffsetLabel_ = new QLabel(QStringLiteral("Video − Desktop Audio timestamp: —"), diagnosticDetailsWidget_);
+		micOffsetLabel_ = new QLabel(QStringLiteral("Mic − Desktop Audio timestamp: —"), diagnosticDetailsWidget_);
+		obsStatsLabel_ = new QLabel(QStringLiteral("OBS: —"), diagnosticDetailsWidget_);
+		detailsLayout->addWidget(automationStatusLabel_);
+		detailsLayout->addWidget(healthLabel_);
+		detailsLayout->addWidget(avOffsetLabel_);
+		detailsLayout->addWidget(micOffsetLabel_);
+		detailsLayout->addWidget(obsStatsLabel_);
+
+		statusTable_ = new QTableWidget(3, 8, diagnosticDetailsWidget_);
 		statusTable_->setHorizontalHeaderLabels({QStringLiteral("Role"), QStringLiteral("OBS source"),
 							 QStringLiteral("State"), QStringLiteral("Packet age"),
 							 QStringLiteral("Timestamp jumps"), QStringLiteral("Resets"),
@@ -1276,14 +1439,27 @@ private:
 			for (int col = 0; col < 8; ++col)
 				statusTable_->setItem(row, col, new QTableWidgetItem());
 		}
-		diagnosticsLayout->addWidget(statusTable_);
+		detailsLayout->addWidget(statusTable_);
+		diagnosticDetailsWidget_->setVisible(false);
+		diagnosticsLayout->addWidget(diagnosticDetailsWidget_);
+		QObject::connect(diagnosticDetailsToggle_, &QToolButton::toggled, [this](bool shown) {
+			diagnosticDetailsWidget_->setVisible(shown);
+			diagnosticDetailsToggle_->setArrowType(shown ? Qt::DownArrow : Qt::RightArrow);
+			diagnosticDetailsToggle_->setText(shown ? QStringLiteral("Hide technical details")
+								    : QStringLiteral("Show technical details"));
+		});
 		root->addWidget(diagnosticsBox);
 
-		eventLog_ = new QTextEdit(scrollContent);
+		QWidget *eventContent = nullptr;
+		auto *eventBox = createCollapsibleSection(QStringLiteral("Event history"), scrollContent, eventContent, false);
+		auto *eventLayout = new QVBoxLayout(eventContent);
+		eventLayout->setContentsMargins(0, 0, 0, 0);
+		eventLog_ = new QTextEdit(eventContent);
 		eventLog_->setReadOnly(true);
 		eventLog_->setMinimumHeight(72);
 		eventLog_->setMaximumHeight(110);
-		root->addWidget(eventLog_);
+		eventLayout->addWidget(eventLog_);
+		root->addWidget(eventBox);
 
 		scrollArea->setWidget(scrollContent);
 		outerLayout->addWidget(scrollArea);
@@ -1739,7 +1915,7 @@ private:
 				queueBackgroundEvent(QStringLiteral("Warning: %1 reset completed, but one or more original DistroAV settings could not be verified")
 							 .arg(ticket->role));
 			} else {
-				queueBackgroundEvent(QStringLiteral("%1 reset restored original DistroAV settings (FrameSync %2)")
+				queueBackgroundEvent(QStringLiteral("%1 reset restored all saved source properties (FrameSync %2)")
 							 .arg(ticket->role,
 							      ticket->expectedFrameSync ? QStringLiteral("On") : QStringLiteral("Off")));
 			}
@@ -1892,30 +2068,28 @@ private:
 		}
 
 		const double ppm = states_[1].softSync.correctionPpm.load();
-		const double target = states_[1].softSync.targetPpm.load();
 		const double rate = controllerRateMsPerMinute_.load();
 		const double delay = softSyncAccumulatedDelayMs();
 		const double estimated = softSyncEstimatedDriftMs_.load();
 		QString action;
 		if (!std::isfinite(rate))
-			action = QStringLiteral("learning the 60–120 second trend");
+			action = QStringLiteral("learning trend");
 		else if (std::fabs(ppm) < 0.25)
-			action = QStringLiteral("holding neutral");
+			action = QStringLiteral("neutral");
 		else if (ppm > 0.0)
-			action = QStringLiteral("gently slowing desktop audio");
+			action = QStringLiteral("slowing audio");
 		else
-			action = QStringLiteral("gently speeding desktop audio");
-		QString estimatedText = std::isfinite(estimated)
-			? QStringLiteral(" | estimated corrected drift %1 ms").arg(estimated, 0, 'f', 1)
+			action = QStringLiteral("speeding audio");
+		QString correctedText = std::isfinite(estimated)
+			? QStringLiteral(" · corrected drift %1 ms").arg(estimated, 0, 'f', 1)
 			: QString();
 		softSyncStatusLabel_->setText(
-			QStringLiteral("Soft Sync: %1 | correction %2 ppm (target %3) | accumulated trim %4 ms%5%6")
+			QStringLiteral("Soft Sync: %1 · %2 ppm · trim %3 ms%4%5")
 				.arg(action)
-				.arg(ppm, 0, 'f', 2)
-				.arg(target, 0, 'f', 2)
-				.arg(delay, 0, 'f', 2)
-				.arg(estimatedText)
-				.arg(engineSettings_.softSyncLinkMic.load() ? QStringLiteral(" | mic linked") : QString()));
+				.arg(ppm, 0, 'f', 1)
+				.arg(delay, 0, 'f', 1)
+				.arg(correctedText)
+				.arg(engineSettings_.softSyncLinkMic.load() ? QStringLiteral(" · mic linked") : QString()));
 	}
 
 	static void updateEngineConditionTimer(bool condition, uint64_t &since, uint64_t now)
@@ -1961,7 +2135,7 @@ private:
 		case IssueKind::MicStall:
 			return micFresh;
 		case IssueKind::PersistentDrift: {
-			const double drift = currentDriftMs();
+			const double drift = driftForPersistentDetectionMs();
 			if (!videoFresh || !desktopFresh || !std::isfinite(drift))
 				return false;
 			return std::fabs(drift) < engineSettings_.driftThresholdMs.load() * 0.75 ||
@@ -2026,7 +2200,7 @@ private:
 		backgroundRecovery_.target = target;
 		backgroundRecovery_.issue = issue;
 		backgroundRecovery_.reason = reason;
-		backgroundRecovery_.preDriftMs = currentDriftMs();
+		backgroundRecovery_.preDriftMs = driftForPersistentDetectionMs();
 		backgroundRecovery_.verifyAtNs = now +
 			static_cast<uint64_t>(engineSettings_.pulseDurationMs.load()) * kNsPerMs +
 			static_cast<uint64_t>(engineSettings_.verifyDelaySec.load()) * kNsPerSecond;
@@ -2130,10 +2304,10 @@ private:
 		updateEngineConditionTimer(freeze && videoFresh && !desktopFresh, engineDesktopStallSinceNs_, now);
 		updateEngineConditionTimer(freeze && micStale && (videoFresh || desktopFresh), engineMicStallSinceNs_, now);
 
-		// Reset fallback follows the uncorrected transport drift. Soft Sync may
-		// keep the audible output aligned, but a receiver rebuild still recenters
-		// the transport before accumulated trim becomes excessive.
-		const double drift = currentDriftMs();
+		// When Adaptive Soft Sync is active, the ordinary persistent-drift threshold
+		// follows the estimated corrected output relationship. With Soft Sync off,
+		// it follows the uncorrected transport drift exactly as before.
+		const double drift = driftForPersistentDetectionMs();
 		updateEngineConditionTimer(engineSettings_.enableDriftDetection.load() && videoFresh && desktopFresh &&
 					 std::isfinite(drift) && std::fabs(drift) >= engineSettings_.driftThresholdMs.load(),
 					 engineDriftSinceNs_, now);
@@ -2165,8 +2339,11 @@ private:
 			   static_cast<uint64_t>(engineSettings_.driftPersistenceMs.load()) * kNsPerMs) {
 			issue = IssueKind::PersistentDrift;
 			target = drift < 0.0 ? RecoveryTarget::Video : RecoveryTarget::DesktopAudio;
-			reason = QStringLiteral("effective A/V drift remained at %1 ms beyond the configured threshold")
-					 .arg(drift, 0, 'f', 1);
+			reason = softSyncCorrectionActive()
+				? QStringLiteral("Soft Sync-corrected A/V drift remained at %1 ms beyond the configured threshold")
+					  .arg(drift, 0, 'f', 1)
+				: QStringLiteral("A/V drift remained at %1 ms beyond the configured threshold")
+					  .arg(drift, 0, 'f', 1);
 		}
 		if (issue == IssueKind::None)
 			return;
@@ -2489,6 +2666,7 @@ private:
 		auto ticket = std::make_shared<ResetTicket>();
 		ticket->original = obs_source_get_settings(source);
 		makeDistroAvSettingsExplicit(ticket->original);
+		ticket->runtime.capture(source);
 		ticket->weak = obs_source_get_weak_source(source);
 		ticket->resetFlag = state.resetInProgress;
 		ticket->role = state.role;
@@ -2619,11 +2797,13 @@ private:
 				obs_data_release(state.snapshot);
 				state.snapshot = nullptr;
 			}
+			state.snapshotRuntime = SourceRuntimeSnapshot{};
 			obs_source_t *source = sourceForState(state);
 			if (!source)
 				continue;
 			state.snapshot = obs_source_get_settings(source);
 			makeDistroAvSettingsExplicit(state.snapshot);
+			state.snapshotRuntime.capture(source);
 			obs_source_release(source);
 			captured++;
 		}
@@ -2649,9 +2829,11 @@ private:
 			obs_source_t *source = sourceForState(state);
 			if (!source)
 				continue;
-			// Clear any temporary/default values before applying the complete saved
-			// object, including an explicitly stored FrameSync=false value.
-			obs_source_reset_settings(source, state.snapshot);
+			// Restore non-destructively so properties that are absent from the saved
+			// JSON (usually values equal to defaults) are not erased. Then restore
+			// OBS-level audio routing, sync offset, monitoring and presentation state.
+			obs_source_update(source, state.snapshot);
+			state.snapshotRuntime.restore(source);
 			obs_source_release(source);
 			restored++;
 		}
@@ -2660,7 +2842,7 @@ private:
 			restoringSnapshot_ = false;
 			return;
 		}
-		appendEvent(QStringLiteral("Restored last known-good settings for %1 source(s)").arg(restored));
+		appendEvent(QStringLiteral("Restored last known-good settings and OBS source properties for %1 source(s)").arg(restored));
 		snapshotRebuildResultReady_.store(false);
 		snapshotRebuildAtNs_.store(os_gettime_ns() + 100ULL * kNsPerMs);
 		watchdogCv_.notify_all();
@@ -2723,18 +2905,43 @@ private:
 		}
 
 		if (std::isfinite(drift)) {
+			const bool correctedActive = softSyncCorrectionActive();
+			const double correctedDrift = correctedActive ? effectiveDriftMs() : drift;
+			const double displaySeverity = std::isfinite(correctedDrift) ? std::fabs(correctedDrift)
+										      : std::fabs(drift);
+			const double warningPoint = std::max(static_cast<double>(softSyncDeadZoneMs_->value()),
+										  static_cast<double>(driftThresholdMs_->value()) * 0.5);
+			QString driftColor = QStringLiteral("#8bd49c");
+			if (displaySeverity >= static_cast<double>(driftThresholdMs_->value()))
+				driftColor = QStringLiteral("#ff7b72");
+			else if (displaySeverity >= warningPoint)
+				driftColor = QStringLiteral("#f2c66d");
+
+			if (correctedActive && std::isfinite(correctedDrift)) {
+				driftLabel_->setText(QStringLiteral("Drift from baseline: %1 ms  →  Adaptive Sync corrected to %2 ms")
+							    .arg(drift, 0, 'f', 1)
+							    .arg(correctedDrift, 0, 'f', 1));
+			} else {
+				driftLabel_->setText(QStringLiteral("Drift from baseline: %1 ms").arg(drift, 0, 'f', 1));
+			}
+			driftLabel_->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; color: %1;")
+							 .arg(driftColor));
+
 			const QString rateText = std::isfinite(rate) ? QStringLiteral("%1 ms/min").arg(rate, 0, 'f', 2)
 									 : QStringLiteral("settling");
-			driftLabel_->setText(QStringLiteral("Drift from baseline: %1 ms | rate %2 | baseline %3 ms | (%4)")
-						    .arg(drift, 0, 'f', 2)
-						    .arg(rateText)
-						    .arg(baseline, 0, 'f', 2)
-						    .arg(driftDirectionDescription(drift, rate)));
+			driftTrendLabel_->setText(QStringLiteral("Trend: %1 · %2 · baseline %3 ms")
+							      .arg(rateText)
+							      .arg(driftDirectionShort(rate))
+							      .arg(baseline, 0, 'f', 1));
 		} else if (states_[0].firstValidSampleWallNs.load() && states_[1].firstValidSampleWallNs.load()) {
-			driftLabel_->setText(QStringLiteral("Drift from baseline: calibrating — %1 seconds of stable data required")
-							    .arg(static_cast<int>(kBaselineWindowNs / kNsPerSecond)));
+			driftLabel_->setText(QStringLiteral("Drift from baseline: calibrating"));
+			driftLabel_->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; color: #cbd3df;"));
+			driftTrendLabel_->setText(QStringLiteral("Learning %1 seconds of stable timing data")
+								 .arg(static_cast<int>(kBaselineWindowNs / kNsPerSecond)));
 		} else {
-			driftLabel_->setText(QStringLiteral("Drift from baseline: waiting for valid video and desktop-audio timestamps"));
+			driftLabel_->setText(QStringLiteral("Drift from baseline: waiting for timestamps"));
+			driftLabel_->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; color: #cbd3df;"));
+			driftTrendLabel_->setText(QStringLiteral("Waiting for valid video and desktop-audio timing"));
 		}
 
 		micOffsetLabel_->setText(std::isfinite(micOffset)
@@ -2885,9 +3092,14 @@ private:
 		return filtered - baseline;
 	}
 
+	bool softSyncCorrectionActive() const
+	{
+		return engineSettings_.softSyncEnabled.load() && states_[1].softSync.enabled.load();
+	}
+
 	double softSyncAccumulatedDelayMs() const
 	{
-		if (!engineSettings_.softSyncEnabled.load())
+		if (!softSyncCorrectionActive())
 			return 0.0;
 		const uint32_t sampleRate = states_[1].softSync.sampleRate.load();
 		if (!sampleRate)
@@ -2902,6 +3114,16 @@ private:
 		if (!std::isfinite(rawDrift))
 			return rawDrift;
 		return rawDrift + softSyncAccumulatedDelayMs();
+	}
+
+	double driftForPersistentDetectionMs() const
+	{
+		if (softSyncCorrectionActive()) {
+			const double corrected = effectiveDriftMs();
+			if (std::isfinite(corrected))
+				return corrected;
+		}
+		return currentDriftMs();
 	}
 
 	void updateObsStats()
@@ -3068,7 +3290,7 @@ private:
 		updateConditionTimer(bothAudioStalled, bothAudioStallSinceNs_, now);
 		updateConditionTimer(entireGroupStalled, entireGroupStallSinceNs_, now);
 
-		const double drift = currentDriftMs();
+		const double drift = driftForPersistentDetectionMs();
 		const bool driftExceeded = enableDriftDetection_->isChecked() && std::isfinite(drift) &&
 					   std::abs(drift) >= driftThresholdMs_->value() && videoFresh && desktopFresh;
 		updateConditionTimer(driftExceeded, driftSinceNs_, now);
@@ -3115,10 +3337,15 @@ private:
 			issue = IssueKind::PersistentDrift;
 			target = drift < 0.0 ? RecoveryTarget::Video : RecoveryTarget::DesktopAudio;
 			confidence = 75;
-			reason = QStringLiteral("Filtered A/V offset moved %1 ms from baseline for %2 ms; likely %3 lag")
-					 .arg(drift, 0, 'f', 1)
-					 .arg(driftPersistenceMs_->value())
-					 .arg(drift < 0.0 ? QStringLiteral("video") : QStringLiteral("desktop-audio"));
+			reason = softSyncCorrectionActive()
+				? QStringLiteral("Adaptive Sync-corrected drift remained %1 ms from baseline for %2 ms; likely %3 lag")
+					  .arg(drift, 0, 'f', 1)
+					  .arg(driftPersistenceMs_->value())
+					  .arg(drift < 0.0 ? QStringLiteral("video") : QStringLiteral("desktop-audio"))
+				: QStringLiteral("Filtered A/V offset moved %1 ms from baseline for %2 ms; likely %3 lag")
+					  .arg(drift, 0, 'f', 1)
+					  .arg(driftPersistenceMs_->value())
+					  .arg(drift < 0.0 ? QStringLiteral("video") : QStringLiteral("desktop-audio"));
 		}
 
 		if (issue != IssueKind::None) {
@@ -3271,7 +3498,7 @@ private:
 		recovery_.target = target;
 		recovery_.issue = issue;
 		recovery_.reason = reason;
-		recovery_.preDriftMs = currentDriftMs();
+		recovery_.preDriftMs = driftForPersistentDetectionMs();
 		recovery_.verifyAtNs = now + static_cast<uint64_t>(pulseDurationMs_->value()) * kNsPerMs +
 				       static_cast<uint64_t>(verifyDelaySec_->value()) * kNsPerSecond;
 		detectionSuppressedUntilNs_ = recovery_.verifyAtNs;
@@ -3372,7 +3599,7 @@ private:
 		case IssueKind::MicStall:
 			return micFresh;
 		case IssueKind::PersistentDrift: {
-			const double drift = currentDriftMs();
+			const double drift = driftForPersistentDetectionMs();
 			if (!videoFresh || !desktopFresh || !std::isfinite(drift))
 				return false;
 			const bool belowThreshold = std::abs(drift) < driftThresholdMs_->value() * 0.75;
@@ -3393,6 +3620,7 @@ private:
 		sample.rawOffsetMs = rawOffset;
 		sample.filteredOffsetMs = filteredOffsetMs_.load();
 		sample.driftMs = currentDriftMs();
+		sample.correctedDriftMs = softSyncCorrectionActive() ? effectiveDriftMs() : sample.driftMs;
 		sample.driftRateMsPerMinute = driftRateMsPerMinute_.load();
 		sample.videoAgeMs = packetAgeMs(0, now);
 		sample.desktopAgeMs = packetAgeMs(1, now);
@@ -3413,6 +3641,7 @@ private:
 		insertFinite(object, QStringLiteral("raw_av_offset_ms"), sample.rawOffsetMs);
 		insertFinite(object, QStringLiteral("filtered_av_offset_ms"), sample.filteredOffsetMs);
 		insertFinite(object, QStringLiteral("drift_from_baseline_ms"), sample.driftMs);
+		insertFinite(object, QStringLiteral("corrected_drift_from_baseline_ms"), sample.correctedDriftMs);
 		insertFinite(object, QStringLiteral("drift_rate_ms_per_minute"), sample.driftRateMsPerMinute);
 		insertFinite(object, QStringLiteral("video_packet_age_ms"), sample.videoAgeMs);
 		insertFinite(object, QStringLiteral("desktop_packet_age_ms"), sample.desktopAgeMs);
@@ -3531,6 +3760,8 @@ private:
 			insertFinite(object, QStringLiteral("filtered_video_minus_desktop_ms"), filteredOffsetMs_.load());
 			insertFinite(object, QStringLiteral("baseline_ms"), baselineOffsetMs_.load());
 			insertFinite(object, QStringLiteral("drift_ms"), currentDriftMs());
+			insertFinite(object, QStringLiteral("corrected_drift_ms"),
+				     softSyncCorrectionActive() ? effectiveDriftMs() : currentDriftMs());
 			insertFinite(object, QStringLiteral("drift_rate_ms_per_minute"), driftRateMsPerMinute_.load());
 			insertFinite(object, QStringLiteral("mic_minus_desktop_ms"), calculateMicOffsetMs());
 			object.insert(QStringLiteral("confidence"), currentConfidence_);

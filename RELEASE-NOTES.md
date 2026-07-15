@@ -1,11 +1,18 @@
-# Sync Guardian v0.3.0 controlled-test release
+# Sync Guardian v0.3.2 controlled-test release
 
-This build addresses two observed reliability problems:
+This release changes how persistent drift is judged while Adaptive Soft Sync is active.
 
-1. Automatic resets and pulse restoration no longer depend on Qt dock activity. The watchdog runs independently, so hovering or refocusing OBS should not be required.
-2. Reset pulses now restore the complete captured DistroAV settings and verify FrameSync, latency, timing mode, and NDI target. Audio FrameSync should remain off when it was off before the reset.
+The regular persistent drift threshold now follows the **estimated corrected output drift**, not the uncorrected transport drift. For example, raw `-50 ms` corrected to `-2 ms` will not trip a `50 ms` persistent drift threshold. Disabling Adaptive Soft Sync immediately returns threshold behavior to raw transport drift.
 
-It also adds optional Adaptive Soft Sync. This feature is experimental, off by default, and fully removable. Begin with desktop audio only, mic linking off, a 50 ppm maximum, and a local recording. The controller waits for a long trend and slews correction slowly.
+The dock has also been simplified:
+
+- Drift is the prominent color-coded diagnostic.
+- Adaptive correction appears on the same line.
+- Trend and baseline are shown in a compact secondary line.
+- Technical details can be hidden.
+- Every major section can be collapsed.
+
+Source-property preservation from v0.3.1 remains in place for targeted resets, full-group rebuilds, and saved-state restoration.
 
 The repository includes a GitHub Actions workflow that produces:
 

@@ -1,19 +1,18 @@
-# Sync Guardian v0.3.0
+# Sync Guardian v0.3.2
 
 Sync Guardian is an experimental OBS Studio dock for monitoring DistroAV/NDI receiver sources, detecting stalls and A/V timing drift, and recovering selected receivers without depending on OBS dock repaint activity.
 
 Install it on the **receiving/streaming PC** where the DistroAV sources exist.
 
-## v0.3.0 highlights
+## v0.3.2 highlights
 
-- Background watchdog runs independently of the Qt dock, so resets do not wait for mouse hover or OBS focus.
-- Every reset captures and restores the complete DistroAV source settings. FrameSync, timing mode, latency, and NDI source selection are verified after restoration.
-- Drift and rate are displayed once per second while measurements continue every 250 ms.
-- Offset uses a 10-second median and rate uses robust 60/120-second trend windows.
-- Plain-English direction text explains whether video is gradually dragging or rushing relative to desktop audio.
-- Dark-theme help text has higher contrast.
-- Optional **Adaptive Soft Sync** can apply a tiny, slowly changing audio-rate correction instead of waiting for a large reset.
-- The Windows workflow builds both a portable package and an installer EXE.
+- Persistent drift detection now follows **estimated corrected output drift** while Adaptive Soft Sync is active. With Soft Sync off, it follows raw transport drift as before.
+- Live diagnostics now emphasizes one color-coded drift line.
+- When Adaptive Soft Sync is active, the main line shows both raw drift and the estimated corrected result.
+- Rate, direction, and baseline are moved to a shorter secondary line.
+- Technical diagnostics are hidden behind a dedicated show/hide control.
+- Every major dock section can be collapsed, including source mapping, automation, Adaptive Soft Sync, manual recovery, live diagnostics, and event history.
+- Full-group rebuild and targeted reset restoration preserve captured DistroAV and OBS source settings.
 
 ## Adaptive Soft Sync
 
@@ -26,9 +25,14 @@ The feature can be completely removed from the audio path at any time:
 1. Clear **Enable Adaptive Soft Sync**, or
 2. Press **Disable and remove Soft Sync filters**.
 
-With it disabled, no Sync Guardian resampling filter remains attached and NDI audio returns to normal pass-through. Leave **Apply the same correction to the mapped mic** off unless the mic should intentionally follow the exact desktop-audio rate.
+With it disabled, no Sync Guardian resampling filter remains attached and NDI audio returns to normal pass-through.
 
-The ordinary drift threshold continues to watch the **raw transport drift** even while Soft Sync is holding the audible output closer. When a receiver reset occurs, accumulated Soft Sync trim is recentered so correction does not grow without a reset fallback.
+### Which drift value triggers recovery?
+
+- **Soft Sync off:** persistent drift detection uses raw transport drift.
+- **Soft Sync active:** persistent drift detection uses estimated corrected output drift.
+
+Example: raw drift `-50 ms`, Adaptive Sync correction `+48 ms`, estimated corrected drift `-2 ms`. A `50 ms` persistent drift threshold does not trigger from that corrected result.
 
 ## Install
 
@@ -52,17 +56,9 @@ C:\Program Files\obs-studio\obs-plugins\64bit\sync-guardian.dll
 
 Start OBS and open **Docks > Sync Guardian**.
 
-## Initial test
-
-1. Map NDI Video, Desktop Audio, and Mic.
-2. Keep automation on **Observe only**.
-3. Keep Adaptive Soft Sync **off** for the initial baseline test.
-4. Confirm audio FrameSync remains in the exact state selected in each DistroAV source after manual and automatic resets.
-5. For a Soft Sync test, enable it for desktop audio only, leave mic linking off, and make a local recording for at least an hour.
-
 ## GitHub build
 
-Run **Actions > Build Sync Guardian for Windows**. The artifact `sync-guardian-0.3.0-windows-x64` contains:
+Run **Actions > Build Sync Guardian for Windows**. The artifact `sync-guardian-0.3.2-windows-x64` contains:
 
 - `SyncGuardian-Setup.exe`
 - `SyncGuardian-Portable.zip`
@@ -70,4 +66,4 @@ Run **Actions > Build Sync Guardian for Windows**. The artifact `sync-guardian-0
 
 ## Caution
 
-This is a controlled-test build. Adaptive Soft Sync changes audio sample count by very small amounts and needs real OBS/DistroAV validation before use on an important live stream. The reset watchdog and pass-through monitoring can be used with Soft Sync fully disabled.
+Adaptive Soft Sync changes audio sample count by very small amounts and still needs real OBS/DistroAV validation before use on an important live stream. The monitoring and reset functions remain usable with Adaptive Soft Sync fully disabled.

@@ -1,4 +1,4 @@
-"""Dependency-free sanity model for Sync Guardian v0.3.0 behavior."""
+"""Dependency-free sanity model for Sync Guardian v0.3.2 behavior."""
 
 VIDEO_STALL_MS = 1000
 AUDIO_STALL_MS = 1000
@@ -18,7 +18,8 @@ def ready_for_detection(video_timestamp_seen, desktop_timestamp_seen, settled_ms
     return video_timestamp_seen and desktop_timestamp_seen and settled_ms >= FIRST_SAMPLE_GRACE_MS
 
 
-def choose_issue(video_age, desktop_age, mic_age, drift, drift_duration_ms, mic_expected=True, ready=True):
+def choose_issue(video_age, desktop_age, mic_age, raw_drift, drift_duration_ms, mic_expected=True, ready=True,
+                 soft_sync_enabled=False, corrected_drift=None):
     if not ready:
         return None
     video_fresh = video_age < VIDEO_STALL_MS
@@ -35,8 +36,9 @@ def choose_issue(video_age, desktop_age, mic_age, drift, drift_duration_ms, mic_
         return "desktop"
     if mic_expected and mic_age >= AUDIO_STALL_MS and (video_fresh or desktop_fresh):
         return "mic"
-    if video_fresh and desktop_fresh and abs(drift) >= DRIFT_THRESHOLD_MS and drift_duration_ms >= DRIFT_PERSISTENCE_MS:
-        return "video" if drift < 0 else "desktop"
+    detection_drift = corrected_drift if soft_sync_enabled and corrected_drift is not None else raw_drift
+    if video_fresh and desktop_fresh and abs(detection_drift) >= DRIFT_THRESHOLD_MS and drift_duration_ms >= DRIFT_PERSISTENCE_MS:
+        return "video" if detection_drift < 0 else "desktop"
     return None
 
 
@@ -58,6 +60,19 @@ def reset_restores_original_framesync(original_framesync):
     pulse_value = not original_framesync
     restored_value = original_framesync
     return pulse_value, restored_value
+
+
+
+def destructive_reset(current, saved):
+    """Model obs_source_reset_settings(): current keys are cleared first."""
+    return dict(saved)
+
+
+def nondestructive_update(current, saved):
+    """Model obs_source_update(): saved values are merged into current state."""
+    merged = dict(current)
+    merged.update(saved)
+    return merged
 
 
 def run():
@@ -94,24 +109,58 @@ def run():
     assert slew(10.0, -10.0, 2.0, 0.5) == 9.0
     assert abs(effective_drift(-20.0, 480) - (-10.0)) < 1e-9
 
-    # Soft Sync may make corrected output drift near zero, while reset fallback
-    # still watches raw transport drift so accumulated trim is periodically recentered.
-    raw_transport_drift = -200.0
-    corrected_output_drift = effective_drift(raw_transport_drift, 9_600)
+    # With Soft Sync active, the ordinary persistent-drift threshold follows
+    # corrected output drift. The same raw transport value still trips when
+    # Soft Sync is disabled.
+    raw_transport_drift = -250.0
+    corrected_output_drift = effective_drift(raw_transport_drift, 12_000)
     assert abs(corrected_output_drift) < 1e-9
-    assert abs(raw_transport_drift) >= DRIFT_THRESHOLD_MS
+    assert choose_issue(20, 20, 20, raw_transport_drift, 10_000,
+                        soft_sync_enabled=True, corrected_drift=corrected_output_drift) is None
+    assert choose_issue(20, 20, 20, raw_transport_drift, 10_000,
+                        soft_sync_enabled=False, corrected_drift=corrected_output_drift) == "video"
+
+    # If corrected output itself remains beyond threshold, recovery still triggers.
+    assert choose_issue(20, 20, 20, -250.0, 10_000,
+                        soft_sync_enabled=True, corrected_drift=-225.0) == "video"
 
     # Reset pulses may temporarily invert FrameSync, but must restore the exact
     # pre-reset value for both audio-pass-through and video FrameSync setups.
     assert reset_restores_original_framesync(False) == (True, False)
     assert reset_restores_original_framesync(True) == (False, True)
 
+    # A destructive restore loses properties omitted from a snapshot because
+    # they were defaults or unknown to this plugin version. A merge restore
+    # keeps them while still returning all captured values to their originals.
+    current = {
+        "ndi_framesync": True,
+        "ndi_sync": 2,
+        "latency": 1,
+        "future_distroav_property": "preserve-me",
+    }
+    saved = {"ndi_framesync": False, "ndi_sync": 1, "latency": 0}
+    assert "future_distroav_property" not in destructive_reset(current, saved)
+    restored = nondestructive_update(current, saved)
+    assert restored["ndi_framesync"] is False
+    assert restored["ndi_sync"] == 1
+    assert restored["latency"] == 0
+    assert restored["future_distroav_property"] == "preserve-me"
+
+    runtime_before = {
+        "sync_offset_ns": 50_000_000,
+        "monitoring": "monitor-and-output",
+        "mixers": 0b001011,
+        "volume": 0.82,
+    }
+    runtime_after = dict(runtime_before)
+    assert runtime_after == runtime_before
+
     # Fully disabled Soft Sync means no filter correction is applied.
     soft_sync_enabled = False
     correction_ppm = ppm_for_rate(-1.5) if soft_sync_enabled else 0.0
     assert correction_ppm == 0.0
 
-    print("Sync Guardian v0.3.0 detection, reset-preservation, and Soft Sync model checks passed")
+    print("Sync Guardian v0.3.2 detection, reset-preservation, and Soft Sync model checks passed")
 
 
 if __name__ == "__main__":
