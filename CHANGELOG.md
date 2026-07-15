@@ -1,27 +1,15 @@
 # Changelog
 
-## 0.2.0 — 2026-07-14
+## v0.3.0
 
-- Added Observe, Ask, and Fully Automatic operating modes.
-- Added a five-second rolling-median video-versus-desktop-audio timestamp estimate.
-- Added 30-second stable automatic baseline calibration.
-- Added persistent A/V drift and drift-rate monitoring.
-- Added video, desktop-audio, and microphone packet-stall detection.
-- Added confidence scoring that uses recent timestamp discontinuities only as supporting evidence.
-- Added direction-aware targeted recovery for video-behind and audio-behind cases.
-- Added recovery verification and one optional full-group escalation.
-- Added startup/scene-change grace, output-active gating, source-active gating, cooldowns, and hourly reset limits.
-- Added 30-second pre-event and post-event JSON incident reports.
-- Added explicit timestamp-discontinuity event logging.
-- Added a hotkey for restarting A/V auto calibration.
-- Preserved all Version 1 manual controls, snapshots, event logs, chapter markers, and exact-setting restoration.
-
-## 0.1.0 — 2026-07-14
-
-- Added an OBS dock for mapping the NDI video, desktop-audio, and microphone receiver sources.
-- Added manual per-source and whole-group DistroAV receiver rebuild controls.
-- Added frontend hotkeys for every recovery action.
-- Added complete source-setting snapshots and restore/rebuild support.
-- Added audio/video timestamp monitoring, packet-age monitoring, jump counters, A/V offset estimates, and OBS performance counters.
-- Added recording chapter markers and JSONL event logging.
-- Added reset overlap protection and guaranteed settings restoration when an active reset is interrupted by plugin unload.
+- Moved stall detection, reset scheduling, pulse restoration, verification, and automatic recovery to a background watchdog independent of Qt hover/focus events.
+- Changed the visible drift and rate refresh cadence to 1000 ms while retaining 250 ms internal sampling.
+- Expanded the offset median to 10 seconds and added robust 60-second display and 120-second controller rate estimates.
+- Added plain-English drift direction text.
+- Increased dark-theme contrast for secondary text and tooltips.
+- Reset pulses now capture, restore, and verify the complete original DistroAV configuration, including FrameSync off on audio sources.
+- Known-good snapshot restoration now uses the watchdog rather than `QTimer::singleShot`.
+- Added experimental Adaptive Soft Sync, disabled by default and fully removable, with desktop-only or linked-mic modes.
+- Added pre-filter timestamp tracking so Soft Sync correction is not counted twice in drift measurement.
+- Kept reset fallback tied to raw transport drift and recentered accumulated Soft Sync trim after successful receiver resets.
+- Added a Windows installer workflow producing `SyncGuardian-Setup.exe`, a portable ZIP, and checksums.

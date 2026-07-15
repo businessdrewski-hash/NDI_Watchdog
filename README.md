@@ -1,50 +1,48 @@
-# Sync Guardian
+# Sync Guardian v0.3.0
 
-Sync Guardian is an experimental OBS Studio dock for monitoring DistroAV/NDI receiver sources, detecting possible synchronization problems, and providing targeted recovery controls.
+Sync Guardian is an experimental OBS Studio dock for monitoring DistroAV/NDI receiver sources, detecting stalls and A/V timing drift, and recovering selected receivers without depending on OBS dock repaint activity.
 
-Install it on the **receiving/streaming PC** where the NDI sources are added to OBS.
+Install it on the **receiving/streaming PC** where the DistroAV sources exist.
 
-## Features
+## v0.3.0 highlights
 
-- Monitors one NDI video source, one desktop-audio source, and one microphone source
-- Estimates video-to-audio timestamp drift from a calibrated baseline
-- Detects stalled video or audio sources
-- Shows a short current and session-history health summary
-- Highlights the most likely manual recovery button when an issue is detected
-- Provides targeted resets for video, individual audio sources, both audio sources, or the entire NDI group
-- Supports **Observe only**, **Ask before resetting**, and **Fully automatic** modes
-- Includes cooldowns, reset limits, grace periods, and recovery verification
-- Uses a compact, scrollable dock suitable for 1080p displays
+- Background watchdog runs independently of the Qt dock, so resets do not wait for mouse hover or OBS focus.
+- Every reset captures and restores the complete DistroAV source settings. FrameSync, timing mode, latency, and NDI source selection are verified after restoration.
+- Drift and rate are displayed once per second while measurements continue every 250 ms.
+- Offset uses a 10-second median and rate uses robust 60/120-second trend windows.
+- Plain-English direction text explains whether video is gradually dragging or rushing relative to desktop audio.
+- Dark-theme help text has higher contrast.
+- Optional **Adaptive Soft Sync** can apply a tiny, slowly changing audio-rate correction instead of waiting for a large reset.
+- The Windows workflow builds both a portable package and an installer EXE.
+
+## Adaptive Soft Sync
+
+Adaptive Soft Sync is **experimental and disabled by default**.
+
+When enabled, Sync Guardian attaches a private audio filter to the mapped desktop-audio source and applies a heavily limited correction measured in parts per million. A typical -1.5 ms/min drift needs about +25 ppm. The default maximum is 50 ppm and the correction changes by only 1 ppm per second.
+
+The feature can be completely removed from the audio path at any time:
+
+1. Clear **Enable Adaptive Soft Sync**, or
+2. Press **Disable and remove Soft Sync filters**.
+
+With it disabled, no Sync Guardian resampling filter remains attached and NDI audio returns to normal pass-through. Leave **Apply the same correction to the mapped mic** off unless the mic should intentionally follow the exact desktop-audio rate.
+
+The ordinary drift threshold continues to watch the **raw transport drift** even while Soft Sync is holding the audible output closer. When a receiver reset occurs, accumulated Soft Sync trim is recentered so correction does not grow without a reset fallback.
 
 ## Install
 
-Download and extract the compiled Windows artifact.
+### Installer
 
-The extracted package should contain:
+Run `SyncGuardian-Setup.exe` while OBS is closed.
 
-```text
-obs-plugins\
-  64bit\
-    sync-guardian.dll
+### Portable install
 
-data\
-  obs-plugins\
-    sync-guardian\
-      locale\
-        en-US.ini
-```
-
-1. Close OBS completely.
-2. Select the extracted `obs-plugins` and `data` folders.
-3. Drag both folders into:
+Extract `SyncGuardian-Portable.zip`, then copy its `obs-plugins` and `data` folders into:
 
 ```text
 C:\Program Files\obs-studio\
 ```
-
-4. Allow Windows to merge the folders and replace files when updating.
-5. Start OBS.
-6. Open **Docks → Sync Guardian**.
 
 The DLL should end up at:
 
@@ -52,62 +50,24 @@ The DLL should end up at:
 C:\Program Files\obs-studio\obs-plugins\64bit\sync-guardian.dll
 ```
 
-Do not place the plugin DLL in `bin\64bit`.
+Start OBS and open **Docks > Sync Guardian**.
 
-## Initial setup
+## Initial test
 
-1. Open **Docks → Sync Guardian**.
-2. Click **Refresh Source List**.
-3. Map the NDI video, desktop-audio, and microphone receiver sources.
-4. Leave the mode on **Observe only** during initial testing.
-5. Allow the sources to run long enough for Sync Guardian to establish a stable baseline.
-6. Test each manual recovery action during a non-critical recording before enabling automatic recovery.
+1. Map NDI Video, Desktop Audio, and Mic.
+2. Keep automation on **Observe only**.
+3. Keep Adaptive Soft Sync **off** for the initial baseline test.
+4. Confirm audio FrameSync remains in the exact state selected in each DistroAV source after manual and automatic resets.
+5. For a Soft Sync test, enable it for desktop audio only, leave mic linking off, and make a local recording for at least an hour.
 
-## Operating modes
+## GitHub build
 
-- **Observe only** — monitors and reports issues without resetting anything.
-- **Ask before resetting** — recommends a recovery action and asks for confirmation.
-- **Fully automatic** — performs a targeted recovery after an issue remains beyond the configured thresholds.
+Run **Actions > Build Sync Guardian for Windows**. The artifact `sync-guardian-0.3.0-windows-x64` contains:
 
-A single timestamp jump does not trigger an automatic reset by itself.
+- `SyncGuardian-Setup.exe`
+- `SyncGuardian-Portable.zip`
+- `SHA256SUMS.txt`
 
-## Updating
+## Caution
 
-1. Download and extract the new compiled artifact.
-2. Close OBS completely.
-3. Drag the new `obs-plugins` and `data` folders into:
-
-```text
-C:\Program Files\obs-studio\
-```
-
-4. Approve folder merging and file replacement.
-5. Restart OBS.
-
-Existing Sync Guardian mappings and settings should remain in the OBS plugin configuration directory.
-
-## Troubleshooting
-
-### Sync Guardian is not listed under Docks
-
-Confirm the DLL is located at:
-
-```text
-C:\Program Files\obs-studio\obs-plugins\64bit\sync-guardian.dll
-```
-
-Then open **Help → Log Files → View Current Log** and search for `sync-guardian`.
-
-### NDI sources do not appear in the mapping lists
-
-- Confirm the plugin is installed on the receiving/streaming PC.
-- Confirm the DistroAV receiver sources already exist in OBS.
-- Click **Refresh Source List**.
-
-### The interface does not fit
-
-The dock is vertically scrollable. Make sure **Docks → Lock Docks** is disabled if you need to resize or reposition it.
-
-## Status
-
-Sync Guardian is experimental. Use **Observe only** first and validate detection and manual recovery behavior before relying on automatic recovery during an important stream.
+This is a controlled-test build. Adaptive Soft Sync changes audio sample count by very small amounts and needs real OBS/DistroAV validation before use on an important live stream. The reset watchdog and pass-through monitoring can be used with Soft Sync fully disabled.

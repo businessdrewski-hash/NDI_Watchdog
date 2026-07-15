@@ -1,85 +1,36 @@
 # Detection and recovery design
 
-## Offset estimate
+## Background watchdog
 
-For each stream, Sync Guardian stores the most recent source timestamp and the monotonic wall-clock time at which that timestamp was observed.
+The watchdog samples every 250 ms on its own thread. It handles timestamp sampling, stall/drift persistence, reset initiation, the reset-pulse deadline, exact settings restoration, verification, cooldowns, and optional automatic escalation. The Qt dock only presents the latest state once per second.
 
-The current stream position is estimated as:
+## A/V comparison
 
-```text
-projected position = last source timestamp + (now - callback observation time)
-```
+Video and desktop-audio timestamps are projected to the same monotonic wall-clock moment. The visible offset uses a 10-second median. A robust 60-second slope drives the displayed rate, while a robust 120-second slope is available to the optional Soft Sync controller. Thirty stable seconds establish the baseline.
 
-The raw A/V estimate is:
+When Adaptive Soft Sync is attached, measurement uses the filter's raw input timestamp rather than a possibly corrected post-filter timestamp. The controller then adds its accumulated sample trim separately to estimate corrected output drift.
 
-```text
-projected video position - projected desktop-audio position
-```
+## Reset pulse and settings preservation
 
-A five-second rolling median is used as the operational value.
+A reset temporarily flips DistroAV FrameSync to force receiver reconstruction. Before the pulse, Sync Guardian captures the complete source settings and explicitly records FrameSync, latency, timing mode, and NDI target. At the pulse deadline it clears the temporary settings, restores the complete captured object, verifies the critical values, and retries once if necessary.
 
-## Baseline calibration
+The temporary flip is not a requested final setting. An audio source that entered the reset with FrameSync off must finish with FrameSync off.
 
-After the startup grace period, the plugin waits until it has approximately 30 seconds of fresh A/V samples. Calibration is accepted only when the sample range stays within the larger of:
+## Adaptive Soft Sync
 
-- 25 ms
-- 25% of the configured persistent-drift threshold
+Soft Sync is optional, disabled by default, and removable. It applies a bounded linear resample correction to desktop audio. Positive ppm adds a tiny amount of duration to slow audio; negative ppm removes a tiny amount to speed it. Defaults are a 12 ms position dead zone, 50 ppm maximum, and 1 ppm/sec slew.
 
-A timestamp discontinuity can therefore delay calibration until the unstable sample leaves the 30-second window.
+The mapped mic is not corrected unless linked explicitly. Disabling Soft Sync detaches the private filters and zeros all correction state.
 
-## Conditions
+Persistent-drift reset fallback still watches raw transport drift. A successful video/group recovery recenters accumulated desktop and linked-mic trim, preventing Soft Sync from hiding an ever-growing transport offset indefinitely.
 
-### Video stall
+## Default safeguards
 
-- Video age exceeds the configured video threshold.
-- Desktop audio remains fresh.
-- Condition remains true for at least 500 ms after crossing the packet-age threshold.
-
-### Desktop-audio stall
-
-- Desktop-audio age exceeds the configured audio threshold.
-- Video remains fresh.
-- Condition remains true for at least 500 ms.
-
-### Microphone stall
-
-- The mapped microphone source is enabled and active.
-- Microphone age exceeds the configured audio threshold.
-- Video or desktop audio remains fresh.
-- Condition remains true for at least 500 ms.
-
-### Persistent A/V drift
-
-- A valid calibrated baseline exists.
-- Video and desktop audio remain fresh.
-- Absolute filtered deviation exceeds the configured threshold.
-- The condition remains true for the configured persistence duration.
-
-## Confidence
-
-Base confidence:
-
-- Video stall: 95
-- Desktop-audio stall: 95
-- Microphone stall: 90
-- Persistent drift: 75
-
-Additional evidence:
-
-- Timestamp discontinuity within five seconds: +15
-- Drift rate of at least 30 ms/min moving farther from baseline: +10
-
-Confidence is capped at 100.
-
-A timestamp discontinuity alone has no recovery target and cannot trigger a reset.
-
-## Recovery verification
-
-Packet-stall incidents verify when the affected source becomes fresh.
-
-Persistent-drift incidents verify when:
-
-- Both video and desktop audio are fresh; and
-- The deviation is below 75% of the configured threshold, or it improved by at least 50% from its pre-reset value.
-
-If verification fails, one full-group rebuild may be attempted, subject to the hourly reset limit. A second failed verification ends automatic action and starts the configured cooldown.
+- Observe only by default.
+- 1000 ms stale threshold plus 500 ms confirmation.
+- 200 ms drift for 10 seconds.
+- 180-second automatic reset cooldown.
+- Three automatic reset actions per hour.
+- Thirty-second startup/scene-change grace.
+- Five-second post-reset verification.
+- At most one full-group escalation after a targeted reset fails.

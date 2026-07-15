@@ -1,27 +1,30 @@
-# Validation notes
+# Validation notes — v0.3.0
 
-Performed on 2026-07-14:
+Performed as source-level and dependency-free validation on 2026-07-15.
 
-- `plugin-main.cpp` passed Clang C++17 syntax checking with `-Wall -Wextra -Wpedantic -Werror` against locally defined OBS/Qt interface stubs.
-- The CMake project configured and generated successfully with Ninja against mock imported targets named `OBS::libobs`, `OBS::obs-frontend-api`, `Qt6::Core`, and `Qt6::Widgets`.
-- Static review covered:
-  - Audio callback/GUI-thread separation through atomics
-  - Reset ticket ownership and exact settings restoration
-  - Prevention of overlapping reset pulses
-  - Startup, cooldown, and post-reset suppression windows
-  - Rolling-window pruning and 30-second baseline calibration
-  - Single-jump non-action behavior
-  - Target selection from A/V drift direction
-  - Recovery verification and one-time escalation
-  - Hourly automatic-reset limit enforcement
-  - Plugin-unload finalization of active incident reports
-- DistroAV's current `ndi-source.cpp` was checked to confirm that changing `ndi_framesync` is one of the changes that requires its internal NDI receiver to be reset.
+## Completed
 
-Not performed in this environment:
+- Python behavior model passes for detection targets and default safeguards.
+- Model verifies both original FrameSync states: off pulses on then restores off; on pulses off then restores on.
+- Model verifies Soft Sync direction, 50 ppm clamping, slew limiting, accumulated trim accounting, and fully disabled behavior.
+- Safety-critical reset timing no longer uses `QTimer::singleShot`.
+- Reset restoration uses the complete saved settings object and verifies FrameSync, latency, sync mode, and NDI target.
+- Soft Sync tracks pre-filter audio timestamps separately from corrected output timestamps.
+- Drift reset fallback continues to use raw transport drift, and successful recovery targets recenter accumulated Soft Sync trim.
+- UI display timer is 1000 ms; watchdog sampling remains 250 ms.
+- GitHub Actions metadata and Inno Setup metadata are v0.3.0.
 
-- Linking against the real Windows OBS Studio 32.1.2 SDK and its matching Qt build.
-- Loading the resulting DLL inside OBS.
-- Live NDI reset, timestamp, or incident-report testing on the user's two-PC setup.
-- Validation that every NDI source always exposes a CPU-readable asynchronous frame through `obs_source_get_frame` on the target system.
+## Required Windows validation
 
-Treat v0.2.0 as a controlled-test source build, not a production-live-stream release.
+This Linux environment cannot compile or load the Windows OBS plugin. Before production use:
+
+1. Build with the included GitHub Actions workflow.
+2. Confirm OBS starts without plugin-load errors.
+3. With audio FrameSync off, run each reset button and verify it remains off afterward.
+4. Leave OBS unfocused and the dock untouched while forcing a stale source; confirm recovery occurs without mouse movement.
+5. Run at least one hour with Soft Sync disabled to establish the normal transport drift.
+6. Run a separate local-recording test with desktop-only Soft Sync enabled, default 50 ppm maximum, and mic linking off.
+7. Inspect sharp A/V events and listen for clicks, cuts, pitch changes, repeated samples, or buffer warnings.
+8. Confirm disabling Soft Sync removes its private filters and returns audio to pass-through.
+
+Treat Adaptive Soft Sync as experimental until these checks pass.
