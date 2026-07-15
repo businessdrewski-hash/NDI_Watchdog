@@ -297,6 +297,14 @@ Sync Guardian is experimental software intended for controlled testing before us
 
 A local recording with visible and audible sync markers remains the best way to verify final viewer-facing alignment.
 
-## License
+## License & Legal 
+Sync Guardian is free software licensed under the GNU General Public
+License v2.0 or later. The complete source code is available from the
+official Sync Guardian GitHub repository.
 
+Sync Guardian is an independent third-party project and is not affiliated
+with or endorsed by the OBS Project, DistroAV, or Vizrt NDI AB.
+
+OBS and OBS Studio are registered trademarks of Wizards of OBS LLC.
+NDI® is a registered trademark of Vizrt NDI AB. 
 See [LICENSE](LICENSE).
