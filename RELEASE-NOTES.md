@@ -1,9 +1,5 @@
-# Sync Guardian v0.3.3
+# Sync Guardian v0.3.4
 
-## Compact collapsible interface
+This hotfix expands Adaptive Soft Sync for controlled fast catch-up. The maximum correction control now permits up to 5000 ppm (0.5%), while remaining at a conservative 50 ppm by default. Existing corrected error uses a smooth nonlinear catch-up curve, and correction brakes toward neutral at twice the selected slew rate to reduce overshoot.
 
-- Collapsed sections now shrink to a true single-line header instead of retaining a tall empty panel.
-- Section titles and the expand/collapse control share one compact 24–26 px row.
-- The old Show/Hide text buttons were replaced by a small chevron.
-- Reduced section padding, root spacing, and content margins to fit more controls in the OBS dock.
-- Existing v0.3.2 corrected-drift logic, adaptive audio sync, reset preservation, and diagnostics remain unchanged.
+At 5000 ppm, correction can accumulate at up to 300 ms per minute. This high range may be audible on pitch-sensitive material and should be used as a catch-up ceiling rather than a normal steady-state setting.

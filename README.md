@@ -270,7 +270,7 @@ The source package itself does not include a precompiled Windows DLL.
 - Preserved DistroAV and OBS-level source properties during targeted resets and full-group rebuilds
 - Applied the same preservation behavior to saved-state restoration
 
-### v0.3.3 — Compact collapsible interface
+### v0.3.4 — Compact collapsible interface
 
 - True single-line collapsed headers
 - Small chevron toggles instead of large Show/Hide buttons

@@ -399,7 +399,7 @@ static obs_audio_data *softSyncFilterAudio(void *data, obs_audio_data *audio)
 	if (!filter->control->enabled.load())
 		return audio;
 
-	const double ppm = std::clamp(filter->control->correctionPpm.load(), -500.0, 500.0);
+	const double ppm = std::clamp(filter->control->correctionPpm.load(), -5000.0, 5000.0);
 	if (std::fabs(ppm) < 0.001) {
 		// Preserve the already accumulated timing trim while running at neutral
 		// speed. Returning the original input timestamp here would abruptly erase
@@ -1283,11 +1283,11 @@ private:
 		softSyncForm->addRow(softSyncLinkMic_);
 
 		softSyncDeadZoneMs_ = createSpin(softSyncContent, 5, 100, 12, QStringLiteral(" ms"));
-		softSyncMaxPpm_ = createSpin(softSyncContent, 5, 200, 50, QStringLiteral(" ppm"));
-		softSyncSlewPpmPerSec_ = createSpin(softSyncContent, 1, 20, 1, QStringLiteral(" ppm/sec"));
+		softSyncMaxPpm_ = createSpin(softSyncContent, 5, 5000, 50, QStringLiteral(" ppm"));
+		softSyncSlewPpmPerSec_ = createSpin(softSyncContent, 1, 1000, 100, QStringLiteral(" ppm/sec"));
 		softSyncDeadZoneMs_->setToolTip(QStringLiteral("Small drift inside this range is treated as normal jitter and does not add position correction."));
-		softSyncMaxPpm_->setToolTip(QStringLiteral("Maximum speed correction. 50 ppm is deliberately conservative and is about 2.4 samples per second at 48 kHz."));
-		softSyncSlewPpmPerSec_->setToolTip(QStringLiteral("How quickly the correction may change. A slow slew avoids audible or oscillating corrections."));
+		softSyncMaxPpm_->setToolTip(QStringLiteral("Hard ceiling for adaptive speed correction. 5000 ppm equals 0.5% speed and is intended only for catching up larger errors; normal steady drift should use far less."));
+		softSyncSlewPpmPerSec_->setToolTip(QStringLiteral("Acceleration limit in ppm per second. Braking back toward neutral is allowed at twice this rate so correction can stop cleanly without lingering or overshooting."));
 		softSyncForm->addRow(QStringLiteral("Drift dead zone:"), softSyncDeadZoneMs_);
 		softSyncForm->addRow(QStringLiteral("Maximum correction:"), softSyncMaxPpm_);
 		softSyncForm->addRow(QStringLiteral("Correction slew limit:"), softSyncSlewPpmPerSec_);
@@ -2059,20 +2059,34 @@ private:
 			packetAgeMs(0, now) < engineSettings_.videoStallMs.load() &&
 			packetAgeMs(1, now) < engineSettings_.audioStallMs.load() && !anyResetInProgress();
 		if (timingHealthy && std::isfinite(rawDrift) && std::isfinite(longRate)) {
-			// A -1.5 ms/min raw drift requires approximately +25 ppm: add a tiny
-			// amount of audio duration so desktop audio stops advancing relative to video.
+			// Feed-forward term: a -1.5 ms/min raw drift needs roughly +25 ppm
+			// to stop further separation.
 			target = -longRate * kPpmPerMsPerMinute;
+
+			// Smooth catch-up curve for existing corrected error. Close to the
+			// dead zone this stays gentle; larger errors progressively unlock more
+			// of the configured ceiling. Full-scale catch-up is reached at about
+			// 250 ms outside the dead zone. This avoids a hard step while still
+			// allowing rapid recovery when the user explicitly raises the cap.
 			const double deadZone = static_cast<double>(engineSettings_.softSyncDeadZoneMs.load());
 			if (std::isfinite(estimatedDrift) && std::fabs(estimatedDrift) > deadZone) {
 				const double outside = std::fabs(estimatedDrift) - deadZone;
-				target += -std::copysign(std::min(15.0, outside * 0.15), estimatedDrift);
+				const double normalized = std::clamp(outside / 250.0, 0.0, 1.0);
+				const double curved = normalized * std::sqrt(normalized); // x^1.5 soft knee
+				const double catchUpPpm = static_cast<double>(maxPpm) * curved;
+				target += -std::copysign(catchUpPpm, estimatedDrift);
 			}
 		}
 		target = std::clamp(target, -static_cast<double>(maxPpm), static_cast<double>(maxPpm));
 		desktop.targetPpm.store(target);
 
 		const double current = desktop.correctionPpm.load();
-		const double maxStep = static_cast<double>(std::max(1, engineSettings_.softSyncSlewPpmPerSec.load())) * dtSeconds;
+		const double configuredSlew = static_cast<double>(std::max(1, engineSettings_.softSyncSlewPpmPerSec.load()));
+		// Use the configured slew while accelerating away from neutral. Allow
+		// twice that rate when braking toward zero or reversing direction so a
+		// temporary catch-up command does not linger and overshoot.
+		const bool braking = (std::fabs(target) < std::fabs(current)) || (target * current < 0.0);
+		const double maxStep = configuredSlew * (braking ? 2.0 : 1.0) * dtSeconds;
 		const double next = current + std::clamp(target - current, -maxStep, maxStep);
 		desktop.correctionPpm.store(next);
 		desktop.enabled.store(true);

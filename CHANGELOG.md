@@ -1,6 +1,14 @@
 # Changelog
 
-## v0.3.3
+## v0.3.4 — High-range Adaptive Sync hotfix
+
+- Raised the configurable Adaptive Soft Sync ceiling from 200 ppm to 5000 ppm.
+- Raised the internal resampler clamp to ±5000 ppm.
+- Added a smooth x^1.5 catch-up curve: gentle near the dead zone, progressively faster for larger corrected errors, reaching the selected ceiling around 250 ms outside the dead zone.
+- Expanded the slew control to 1000 ppm/sec and changed braking/deceleration to run at twice the configured acceleration rate to reduce lingering correction and overshoot.
+- Kept the default maximum correction at the conservative 50 ppm for existing users.
+
+## v0.3.4
 
 - Rebuilt collapsible sections as compact one-line headers.
 - Collapsed sections now remove their content height completely.
